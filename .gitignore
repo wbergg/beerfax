@@ -2,3 +2,4 @@ config/config.json
 config.json
 data/
 beerfax
+cron.log
