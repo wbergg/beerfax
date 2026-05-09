@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -18,6 +19,8 @@ import (
 
 	"github.com/wbergg/beerfax/internal/fax"
 )
+
+var errRollNotFound = errors.New("roll not found")
 
 const (
 	apiURL      = "https://beer.wberg.com/api/public/roll"
@@ -80,8 +83,10 @@ type ConsumedEvent struct {
 }
 
 type VetoedEvent struct {
-	VetoedByName string    `json:"vetoedByName"`
-	VetoedAt     time.Time `json:"vetoedAt"`
+	ProductNameBold string    `json:"productNameBold"`
+	ProductNameThin string    `json:"productNameThin"`
+	VetoedByName    string    `json:"vetoedByName"`
+	VetoedAt        time.Time `json:"vetoedAt"`
 }
 
 type Summary struct {
@@ -133,6 +138,10 @@ func run() int {
 
 	resp, err := fetchRoll()
 	if err != nil {
+		if errors.Is(err, errRollNotFound) {
+			log.Printf("api: 404, skipping")
+			return 0
+		}
 		log.Printf("fetch: %v", err)
 		return 2
 	}
@@ -285,6 +294,9 @@ func fetchRoll() (*apiResponse, error) {
 		return nil, err
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusNotFound {
+		return nil, errRollNotFound
+	}
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status %d", res.StatusCode)
 	}
@@ -436,7 +448,7 @@ func renderBody(s Summary, loc *time.Location) string {
 			}
 		}
 		b.WriteString("\n")
-		details := vetoDetails(s.Events, s.Vetoes)
+		details := vetoDetails(s.Vetoes)
 		nameW := 0
 		for _, d := range details {
 			if len(d.user) > nameW {
@@ -1283,16 +1295,9 @@ type vetoDetail struct {
 	at   time.Time
 }
 
-// vetoDetails pairs each veto with the beer name from the most recent prior
-// consumed event. Returns entries chronologically. Vetoes with no prior
-// consumed event use beer="?".
-func vetoDetails(events []ConsumedEvent, vetoes []VetoedEvent) []vetoDetail {
-	consumed := make([]ConsumedEvent, len(events))
-	copy(consumed, events)
-	sort.Slice(consumed, func(i, j int) bool {
-		return consumed[i].ConsumedAt.Before(consumed[j].ConsumedAt)
-	})
-
+// vetoDetails returns each veto's user, vetoed-product name, and veto time,
+// ordered chronologically. Vetoes with an empty VetoedByName are skipped.
+func vetoDetails(vetoes []VetoedEvent) []vetoDetail {
 	vs := make([]VetoedEvent, 0, len(vetoes))
 	for _, v := range vetoes {
 		if v.VetoedByName == "" {
@@ -1306,16 +1311,12 @@ func vetoDetails(events []ConsumedEvent, vetoes []VetoedEvent) []vetoDetail {
 
 	out := make([]vetoDetail, 0, len(vs))
 	for _, v := range vs {
-		beer := "?"
-		for _, e := range consumed {
-			if !e.ConsumedAt.Before(v.VetoedAt) {
-				break
-			}
-			label := sanitize(e.ProductNameBold)
-			if e.ProductNameThin != "" {
-				label += " — " + sanitize(e.ProductNameThin)
-			}
-			beer = label
+		beer := sanitize(v.ProductNameBold)
+		if beer == "" {
+			beer = "?"
+		}
+		if v.ProductNameThin != "" {
+			beer += " — " + sanitize(v.ProductNameThin)
 		}
 		out = append(out, vetoDetail{v.VetoedByName, beer, v.VetoedAt})
 	}
