@@ -80,6 +80,7 @@ type ConsumedEvent struct {
 	AlcoholPercent  float64   `json:"alcoholPercent"`
 	Volume          int       `json:"volume"`
 	Style           string    `json:"style"`
+	DecisionSeconds float64   `json:"decisionSeconds"`
 }
 
 type VetoedEvent struct {
@@ -87,6 +88,7 @@ type VetoedEvent struct {
 	ProductNameThin string    `json:"productNameThin"`
 	VetoedByName    string    `json:"vetoedByName"`
 	VetoedAt        time.Time `json:"vetoedAt"`
+	DecisionSeconds float64   `json:"decisionSeconds"`
 }
 
 type Summary struct {
@@ -868,8 +870,10 @@ func renderSingleStats(events []ConsumedEvent, vetoes []VetoedEvent, start, now 
 	hasStreak := len(streaks) > 0
 	beerStreaks := longestBeerStreak(events, time.Hour)
 	hasBeerStreak := len(beerStreaks) > 0
-	qVetoUser, qVetoGap, hasQVeto, sVetoUser, sVetoGap, hasSVeto := vetoExtremes(events, vetoes)
-	if len(firsts) == 0 && !hasFast && !hasSlow && !hasPH && !hasStreak && !hasBeerStreak && !hasQVeto && !hasSVeto {
+	qAcceptUser, qAcceptGap, hasQAccept, sAcceptUser, sAcceptGap, hasSAccept := acceptDecisionExtremes(events)
+	qVetoUser, qVetoGap, hasQVeto, sVetoUser, sVetoGap, hasSVeto := vetoDecisionExtremes(vetoes)
+	if len(firsts) == 0 && !hasFast && !hasSlow && !hasPH && !hasStreak && !hasBeerStreak &&
+		!hasQAccept && !hasSAccept && !hasQVeto && !hasSVeto {
 		return ""
 	}
 	var b strings.Builder
@@ -975,6 +979,12 @@ func renderSingleStats(events []ConsumedEvent, vetoes []VetoedEvent, start, now 
 			}
 			b.WriteString("\n")
 		}
+	}
+	if hasQAccept {
+		fmt.Fprintf(&b, "Quickest accept: %s — %s\n", formatDuration(qAcceptGap), qAcceptUser)
+	}
+	if hasSAccept && (sAcceptGap != qAcceptGap || sAcceptUser != qAcceptUser) {
+		fmt.Fprintf(&b, "Slowest accept: %s — %s\n", formatDuration(sAcceptGap), sAcceptUser)
 	}
 	if hasQVeto {
 		fmt.Fprintf(&b, "Quickest veto: %s — %s\n", formatDuration(qVetoGap), qVetoUser)
@@ -1205,44 +1215,43 @@ func longestBeerStreak(events []ConsumedEvent, gap time.Duration) []beerStreak {
 	return perUser
 }
 
-// vetoExtremes finds the smallest and largest gaps between a vetoedAt timestamp
-// and the most recent prior event in the day's timeline (consumed or vetoed).
-func vetoExtremes(events []ConsumedEvent, vetoes []VetoedEvent) (
+// vetoDecisionExtremes returns the shortest and longest decision durations
+// reported by the API for vetoed events.
+func vetoDecisionExtremes(vetoes []VetoedEvent) (
 	fastUser string, fastGap time.Duration, hasFast bool,
 	slowUser string, slowGap time.Duration, hasSlow bool,
 ) {
-	timeline := make([]time.Time, 0, len(events)+len(vetoes))
-	for _, e := range events {
-		timeline = append(timeline, e.ConsumedAt)
-	}
 	for _, v := range vetoes {
-		timeline = append(timeline, v.VetoedAt)
-	}
-	sort.Slice(timeline, func(i, j int) bool { return timeline[i].Before(timeline[j]) })
-
-	for _, v := range vetoes {
-		if v.VetoedByName == "" {
+		if v.VetoedByName == "" || v.DecisionSeconds <= 0 {
 			continue
 		}
-		var prior time.Time
-		priorOK := false
-		for _, t := range timeline {
-			if t.Before(v.VetoedAt) {
-				prior = t
-				priorOK = true
-			} else {
-				break
-			}
-		}
-		if !priorOK {
-			continue
-		}
-		g := v.VetoedAt.Sub(prior)
+		g := time.Duration(v.DecisionSeconds * float64(time.Second))
 		if !hasFast || g < fastGap {
 			fastGap, fastUser, hasFast = g, v.VetoedByName, true
 		}
 		if !hasSlow || g > slowGap {
 			slowGap, slowUser, hasSlow = g, v.VetoedByName, true
+		}
+	}
+	return
+}
+
+// acceptDecisionExtremes returns the shortest and longest decision durations
+// reported by the API for consumed events.
+func acceptDecisionExtremes(events []ConsumedEvent) (
+	fastUser string, fastGap time.Duration, hasFast bool,
+	slowUser string, slowGap time.Duration, hasSlow bool,
+) {
+	for _, e := range events {
+		if e.ConsumedByName == "" || e.DecisionSeconds <= 0 {
+			continue
+		}
+		g := time.Duration(e.DecisionSeconds * float64(time.Second))
+		if !hasFast || g < fastGap {
+			fastGap, fastUser, hasFast = g, e.ConsumedByName, true
+		}
+		if !hasSlow || g > slowGap {
+			slowGap, slowUser, hasSlow = g, e.ConsumedByName, true
 		}
 	}
 	return
