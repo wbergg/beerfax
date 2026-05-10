@@ -870,8 +870,8 @@ func renderSingleStats(events []ConsumedEvent, vetoes []VetoedEvent, start, now 
 	hasStreak := len(streaks) > 0
 	beerStreaks := longestBeerStreak(events, time.Hour)
 	hasBeerStreak := len(beerStreaks) > 0
-	qAcceptUser, qAcceptGap, hasQAccept, sAcceptUser, sAcceptGap, hasSAccept := acceptDecisionExtremes(events)
-	qVetoUser, qVetoGap, hasQVeto, sVetoUser, sVetoGap, hasSVeto := vetoDecisionExtremes(vetoes)
+	qAcceptUser, qAcceptBeer, qAcceptGap, hasQAccept, sAcceptUser, sAcceptBeer, sAcceptGap, hasSAccept := acceptDecisionExtremes(events)
+	qVetoUser, qVetoBeer, qVetoGap, hasQVeto, sVetoUser, sVetoBeer, sVetoGap, hasSVeto := vetoDecisionExtremes(vetoes)
 	if len(firsts) == 0 && !hasFast && !hasSlow && !hasPH && !hasStreak && !hasBeerStreak &&
 		!hasQAccept && !hasSAccept && !hasQVeto && !hasSVeto {
 		return ""
@@ -981,16 +981,16 @@ func renderSingleStats(events []ConsumedEvent, vetoes []VetoedEvent, start, now 
 		}
 	}
 	if hasQAccept {
-		fmt.Fprintf(&b, "Quickest accept: %s — %s\n", formatDuration(qAcceptGap), qAcceptUser)
+		fmt.Fprintf(&b, "Quickest accept: %s — %s (%s)\n", formatDuration(qAcceptGap), qAcceptUser, qAcceptBeer)
 	}
 	if hasSAccept && (sAcceptGap != qAcceptGap || sAcceptUser != qAcceptUser) {
-		fmt.Fprintf(&b, "Slowest accept: %s — %s\n", formatDuration(sAcceptGap), sAcceptUser)
+		fmt.Fprintf(&b, "Slowest accept: %s — %s (%s)\n", formatDuration(sAcceptGap), sAcceptUser, sAcceptBeer)
 	}
 	if hasQVeto {
-		fmt.Fprintf(&b, "Quickest veto: %s — %s\n", formatDuration(qVetoGap), qVetoUser)
+		fmt.Fprintf(&b, "Quickest veto: %s — %s (%s)\n", formatDuration(qVetoGap), qVetoUser, qVetoBeer)
 	}
 	if hasSVeto && (sVetoGap != qVetoGap || sVetoUser != qVetoUser) {
-		fmt.Fprintf(&b, "Slowest veto: %s — %s\n", formatDuration(sVetoGap), sVetoUser)
+		fmt.Fprintf(&b, "Slowest veto: %s — %s (%s)\n", formatDuration(sVetoGap), sVetoUser, sVetoBeer)
 	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
@@ -1218,19 +1218,20 @@ func longestBeerStreak(events []ConsumedEvent, gap time.Duration) []beerStreak {
 // vetoDecisionExtremes returns the shortest and longest decision durations
 // reported by the API for vetoed events.
 func vetoDecisionExtremes(vetoes []VetoedEvent) (
-	fastUser string, fastGap time.Duration, hasFast bool,
-	slowUser string, slowGap time.Duration, hasSlow bool,
+	fastUser, fastBeer string, fastGap time.Duration, hasFast bool,
+	slowUser, slowBeer string, slowGap time.Duration, hasSlow bool,
 ) {
 	for _, v := range vetoes {
 		if v.VetoedByName == "" || v.DecisionSeconds <= 0 {
 			continue
 		}
 		g := time.Duration(v.DecisionSeconds * float64(time.Second))
+		beer := beerLabel(v.ProductNameBold, v.ProductNameThin)
 		if !hasFast || g < fastGap {
-			fastGap, fastUser, hasFast = g, v.VetoedByName, true
+			fastGap, fastUser, fastBeer, hasFast = g, v.VetoedByName, beer, true
 		}
 		if !hasSlow || g > slowGap {
-			slowGap, slowUser, hasSlow = g, v.VetoedByName, true
+			slowGap, slowUser, slowBeer, hasSlow = g, v.VetoedByName, beer, true
 		}
 	}
 	return
@@ -1239,22 +1240,34 @@ func vetoDecisionExtremes(vetoes []VetoedEvent) (
 // acceptDecisionExtremes returns the shortest and longest decision durations
 // reported by the API for consumed events.
 func acceptDecisionExtremes(events []ConsumedEvent) (
-	fastUser string, fastGap time.Duration, hasFast bool,
-	slowUser string, slowGap time.Duration, hasSlow bool,
+	fastUser, fastBeer string, fastGap time.Duration, hasFast bool,
+	slowUser, slowBeer string, slowGap time.Duration, hasSlow bool,
 ) {
 	for _, e := range events {
 		if e.ConsumedByName == "" || e.DecisionSeconds <= 0 {
 			continue
 		}
 		g := time.Duration(e.DecisionSeconds * float64(time.Second))
+		beer := beerLabel(e.ProductNameBold, e.ProductNameThin)
 		if !hasFast || g < fastGap {
-			fastGap, fastUser, hasFast = g, e.ConsumedByName, true
+			fastGap, fastUser, fastBeer, hasFast = g, e.ConsumedByName, beer, true
 		}
 		if !hasSlow || g > slowGap {
-			slowGap, slowUser, hasSlow = g, e.ConsumedByName, true
+			slowGap, slowUser, slowBeer, hasSlow = g, e.ConsumedByName, beer, true
 		}
 	}
 	return
+}
+
+func beerLabel(bold, thin string) string {
+	label := sanitize(bold)
+	if label == "" {
+		label = "?"
+	}
+	if thin != "" {
+		label += " — " + sanitize(thin)
+	}
+	return label
 }
 
 func formatDuration(d time.Duration) string {
