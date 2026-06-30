@@ -228,12 +228,12 @@ func run() int {
 	}
 
 	if *dryRun {
-		pdfPath, err := fax.ConvertTIFFToPDF(tiffPath)
-		if err != nil {
+		pdfPath := filepath.Join(jobDir, "preview.pdf")
+		if _, err := fax.ConvertTIFFToPDF(pdfPath, pageTiffs...); err != nil {
 			log.Printf("dry-run pdf: %v", err)
 			return 6
 		}
-		log.Printf("dry-run: tiff at %s, pdf at %s (events=%d, jobDir=%s)", tiffPath, pdfPath, len(events), jobDir)
+		log.Printf("dry-run: tiff at %s, pdf at %s (%d page(s), events=%d, jobDir=%s)", tiffPath, pdfPath, len(pageTiffs), len(events), jobDir)
 		return 0
 	}
 
@@ -253,8 +253,8 @@ func run() int {
 	}
 
 	if *dateFlag != "" {
-		pdfPath, err := fax.ConvertTIFFToPDF(archivePath)
-		if err != nil {
+		pdfPath := strings.TrimSuffix(archivePath, filepath.Ext(archivePath)) + ".pdf"
+		if _, err := fax.ConvertTIFFToPDF(pdfPath, archivePath); err != nil {
 			log.Printf("date replay pdf: %v", err)
 			return 6
 		}

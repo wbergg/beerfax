@@ -92,11 +92,16 @@ func ConvertToTIFF(inputPath, outputDir string, header FaxHeader) (string, error
 	return outPath, nil
 }
 
-// ConvertTIFFToPDF renders a fax TIFF into a viewable PDF alongside it.
-// The output path is the input path with its extension replaced by ".pdf".
-func ConvertTIFFToPDF(tiffPath string) (string, error) {
-	pdfPath := strings.TrimSuffix(tiffPath, filepath.Ext(tiffPath)) + ".pdf"
-	cmd := exec.Command("convert", tiffPath, pdfPath)
+// ConvertTIFFToPDF renders one or more fax TIFFs into a single viewable PDF at
+// pdfPath. Each input becomes one page, in order, so passing the per-page TIFFs
+// yields a multi-page PDF without relying on a combined TIFF's frames being
+// re-read.
+func ConvertTIFFToPDF(pdfPath string, tiffPaths ...string) (string, error) {
+	if len(tiffPaths) == 0 {
+		return "", fmt.Errorf("tiff to pdf: no input tiffs")
+	}
+	args := append(append([]string{}, tiffPaths...), pdfPath)
+	cmd := exec.Command("convert", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("tiff to pdf: %w (output: %s)", err, string(out))
