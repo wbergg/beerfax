@@ -23,11 +23,12 @@ import (
 var errRollNotFound = errors.New("roll not found")
 
 const (
-	apiURL      = "https://beer.wberg.com/api/public/roll"
-	destExt     = 2003
-	callerID    = `"BRD LIVIN Daily" <beerfax>`
-	fromName    = "beerfax"
 	httpTimeout = 10 * time.Second
+	// Transient fetch failures (network errors, 5xx) are retried with linear
+	// backoff so a momentary blip doesn't drop a whole day's fax. 404 and other
+	// 4xx are terminal and not retried.
+	fetchAttempts = 3
+	fetchBackoff  = 2 * time.Second
 
 	// Body PNG matches the body region inside fax.convertImage:
 	// (faxWidth-100, faxHeight - headerH). headerH for our header is 350.
@@ -46,8 +47,16 @@ const (
 )
 
 type appConfig struct {
-	FaxSpoolPath   string `json:"fax_spool_path"`
-	FaxStoragePath string `json:"fax_storage_path"`
+	APIURL         string          `json:"api_url"`
+	Telephony      telephonyConfig `json:"telephony"`
+	FaxSpoolPath   string          `json:"fax_spool_path"`
+	FaxStoragePath string          `json:"fax_storage_path"`
+}
+
+type telephonyConfig struct {
+	DestExt  int    `json:"dest_ext"`
+	CallerID string `json:"caller_id"`
+	FromName string `json:"from_name"`
 }
 
 type apiResponse struct {
@@ -109,7 +118,7 @@ func main() {
 
 func run() int {
 	configPath := flag.String("config", "config/config.json", "path to config.json")
-	dryRun := flag.Bool("dry-run", false, "render the TIFF and exit without archiving or queueing a fax")
+	dryRun := flag.Bool("dry-run", false, "render the TIFF and a viewable PDF, then exit without archiving or queueing a fax")
 	dateFlag := flag.String("date", "", "use a fixed day window (YYYY-MM-DD, 04:00→04:00 next day) instead of in-progress today; archives the TIFF but skips queueing the fax")
 	flag.Parse()
 
@@ -138,7 +147,7 @@ func run() int {
 	}
 	log.Printf("window: %s .. %s", start.Format(time.RFC3339), end.Format(time.RFC3339))
 
-	resp, err := fetchRoll()
+	resp, err := fetchRoll(cfg.APIURL)
 	if err != nil {
 		if errors.Is(err, errRollNotFound) {
 			log.Printf("api: 404, skipping")
@@ -197,8 +206,8 @@ func run() int {
 			subject = fmt.Sprintf("%s (%d/%d)", baseSubject, i+1, len(pages))
 		}
 		pageTiff, err := fax.ConvertToTIFF(pagePNG, jobDir, fax.FaxHeader{
-			To:      strconv.Itoa(destExt),
-			From:    fromName,
+			To:      strconv.Itoa(cfg.Telephony.DestExt),
+			From:    cfg.Telephony.FromName,
 			Subject: subject,
 			Message: message,
 		})
@@ -219,7 +228,12 @@ func run() int {
 	}
 
 	if *dryRun {
-		log.Printf("dry-run: tiff at %s (events=%d, jobDir=%s)", tiffPath, len(events), jobDir)
+		pdfPath, err := fax.ConvertTIFFToPDF(tiffPath)
+		if err != nil {
+			log.Printf("dry-run pdf: %v", err)
+			return 6
+		}
+		log.Printf("dry-run: tiff at %s, pdf at %s (events=%d, jobDir=%s)", tiffPath, pdfPath, len(events), jobDir)
 		return 0
 	}
 
@@ -239,11 +253,16 @@ func run() int {
 	}
 
 	if *dateFlag != "" {
-		log.Printf("date replay: archived tiff at %s (events=%d, jobDir=%s)", archivePath, len(events), jobDir)
+		pdfPath, err := fax.ConvertTIFFToPDF(archivePath)
+		if err != nil {
+			log.Printf("date replay pdf: %v", err)
+			return 6
+		}
+		log.Printf("date replay: archived tiff at %s, pdf at %s (events=%d, jobDir=%s)", archivePath, pdfPath, len(events), jobDir)
 		return 0
 	}
 
-	callFile, err := fax.WriteCallFile(cfg.FaxSpoolPath, int(jobID), destExt, tiffPath, jobDir, callerID)
+	callFile, err := fax.WriteCallFile(cfg.FaxSpoolPath, int(jobID), cfg.Telephony.DestExt, tiffPath, jobDir, cfg.Telephony.CallerID)
 	if err != nil {
 		log.Printf("call file: %v", err)
 		return 7
@@ -262,8 +281,11 @@ func loadConfig(path string) (*appConfig, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
-	if cfg.FaxSpoolPath == "" || cfg.FaxStoragePath == "" {
-		return nil, fmt.Errorf("missing fax_spool_path or fax_storage_path in %s", path)
+	if cfg.APIURL == "" || cfg.FaxSpoolPath == "" || cfg.FaxStoragePath == "" {
+		return nil, fmt.Errorf("missing api_url, fax_spool_path or fax_storage_path in %s", path)
+	}
+	if cfg.Telephony.DestExt == 0 || cfg.Telephony.CallerID == "" || cfg.Telephony.FromName == "" {
+		return nil, fmt.Errorf("missing telephony.dest_ext, telephony.caller_id or telephony.from_name in %s", path)
 	}
 	return cfg, nil
 }
@@ -284,8 +306,31 @@ func dayWindow(now time.Time, loc *time.Location) (start, end time.Time) {
 	return start, end
 }
 
-func fetchRoll() (*apiResponse, error) {
+func fetchRoll(apiURL string) (*apiResponse, error) {
 	client := &http.Client{Timeout: httpTimeout}
+	var lastErr error
+	for attempt := 1; attempt <= fetchAttempts; attempt++ {
+		if attempt > 1 {
+			delay := fetchBackoff * time.Duration(attempt-1)
+			log.Printf("fetch: attempt %d/%d failed (%v), retrying in %s", attempt-1, fetchAttempts, lastErr, delay)
+			time.Sleep(delay)
+		}
+		out, err := fetchRollOnce(client, apiURL)
+		if err == nil {
+			return out, nil
+		}
+		// 404 and other 4xx are terminal; only transient failures are retried.
+		if errors.Is(err, errRollNotFound) || errors.Is(err, errClientStatus) {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+var errClientStatus = errors.New("client error status")
+
+func fetchRollOnce(client *http.Client, apiURL string) (*apiResponse, error) {
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return nil, err
@@ -300,6 +345,9 @@ func fetchRoll() (*apiResponse, error) {
 		return nil, errRollNotFound
 	}
 	if res.StatusCode != http.StatusOK {
+		if res.StatusCode >= 400 && res.StatusCode < 500 {
+			return nil, fmt.Errorf("status %d: %w", res.StatusCode, errClientStatus)
+		}
 		return nil, fmt.Errorf("status %d", res.StatusCode)
 	}
 	var out apiResponse

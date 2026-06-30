@@ -8,6 +8,9 @@ Pulls the in-progress 04:00→04:00 day window from
 per-user details), renders it through ImageMagick to a fax-compliant TIFF,
 and either queues it through Asterisk or just writes it to disk.
 
+The non-fax modes (`--dry-run` and `--date`) also save a viewable PDF
+alongside the TIFF so you can preview the output without a fax machine.
+
 ## Build
 
 ```
@@ -20,18 +23,27 @@ No external Go dependencies — pure stdlib.
 
 ```
 ./beerfax --config config.json              # full pipeline (queue fax)
-./beerfax --config config.json --dry-run    # render TIFF only, no archive, no queue
-./beerfax --config config.json --date 2026-04-29   # replay a fixed day, archive, no queue
+./beerfax --config config.json --dry-run    # render TIFF + PDF, no archive, no queue
+./beerfax --config config.json --date 2026-04-29   # replay a fixed day, archive TIFF + PDF, no queue
 ```
 
 `config.json` (see `config.example.json`):
 
 ```json
 {
+  "api_url": "https://beer.wberg.com/api/public/roll",
+  "telephony": {
+    "dest_ext": 2003,
+    "caller_id": "\"BRD LIVIN Daily\" <beerfax>",
+    "from_name": "beerfax"
+  },
   "fax_spool_path": "/var/spool/asterisk/outgoing",
   "fax_storage_path": "/var/lib/beerfax/storage"
 }
 ```
+
+The `telephony` block sets the Asterisk destination extension (`dest_ext`),
+the fax caller ID, and the from-name stamped on the fax header.
 
 The process needs write access to `fax_storage_path`, to its sibling
 `<storage>/../beerfax/archive/`, and (for the live path) to `fax_spool_path`.

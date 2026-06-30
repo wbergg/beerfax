@@ -1,4 +1,10 @@
 {
+  "api_url": "https://example.com/api/public/roll",
+  "telephony": {
+    "dest_ext": xxxx,
+    "caller_id": "\"caller_id\" <beerfax>",
+    "from_name": "name"
+  },
   "fax_spool_path": "/var/spool/asterisk/outgoing",
   "fax_storage_path": "./data"
 }

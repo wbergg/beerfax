@@ -92,6 +92,18 @@ func ConvertToTIFF(inputPath, outputDir string, header FaxHeader) (string, error
 	return outPath, nil
 }
 
+// ConvertTIFFToPDF renders a fax TIFF into a viewable PDF alongside it.
+// The output path is the input path with its extension replaced by ".pdf".
+func ConvertTIFFToPDF(tiffPath string) (string, error) {
+	pdfPath := strings.TrimSuffix(tiffPath, filepath.Ext(tiffPath)) + ".pdf"
+	cmd := exec.Command("convert", tiffPath, pdfPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("tiff to pdf: %w (output: %s)", err, string(out))
+	}
+	return pdfPath, nil
+}
+
 // shrinkImage resizes a large image down to approximately 250KB using ImageMagick.
 func shrinkImage(input, outputDir string) (string, error) {
 	shrunkPath := filepath.Join(outputDir, "shrunk.jpg")
