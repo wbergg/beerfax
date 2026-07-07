@@ -9,6 +9,7 @@
     "to": ["recipient@example.com"],
     "from": "beerfax <sender@example.com>"
   },
+  "event_start": "2026-07-05",
   "fax_spool_path": "/var/spool/asterisk/outgoing",
   "fax_storage_path": "./data"
 }

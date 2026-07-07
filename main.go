@@ -49,11 +49,16 @@ const (
 )
 
 type appConfig struct {
-	APIURL         string          `json:"api_url"`
-	Telephony      telephonyConfig `json:"telephony"`
-	Email          emailConfig     `json:"email"`
-	FaxSpoolPath   string          `json:"fax_spool_path"`
-	FaxStoragePath string          `json:"fax_storage_path"`
+	APIURL    string          `json:"api_url"`
+	Telephony telephonyConfig `json:"telephony"`
+	Email     emailConfig     `json:"email"`
+	// EventStart (optional, YYYY-MM-DD) drops all consumed/vetoed events
+	// before that day's 04:00 cutoff, so pre-event test data in the backend
+	// never reaches the report. Note the API's pre-computed pool totals
+	// still include such data.
+	EventStart     string `json:"event_start"`
+	FaxSpoolPath   string `json:"fax_spool_path"`
+	FaxStoragePath string `json:"fax_storage_path"`
 }
 
 // emailConfig is optional: with no recipients configured the email step is
@@ -143,6 +148,15 @@ func run() int {
 		log.Printf("tz: %v", err)
 		return 1
 	}
+	var eventStart time.Time
+	if cfg.EventStart != "" {
+		d, err := time.ParseInLocation("2006-01-02", cfg.EventStart, loc)
+		if err != nil {
+			log.Printf("event_start: %v", err)
+			return 1
+		}
+		eventStart = time.Date(d.Year(), d.Month(), d.Day(), 4, 0, 0, 0, loc)
+	}
 	var start, end time.Time
 	if *dateFlag != "" {
 		d, err := time.ParseInLocation("2006-01-02", *dateFlag, loc)
@@ -165,6 +179,14 @@ func run() int {
 		}
 		log.Printf("fetch: %v", err)
 		return 2
+	}
+
+	if !eventStart.IsZero() {
+		before := len(resp.State.Consumed) + len(resp.State.Vetoed)
+		applyEventStart(&resp.State, eventStart)
+		if dropped := before - len(resp.State.Consumed) - len(resp.State.Vetoed); dropped > 0 {
+			log.Printf("event_start: dropped %d pre-event event(s) before %s", dropped, eventStart.Format(time.RFC3339))
+		}
 	}
 
 	events := filterWindow(resp.State.Consumed, start, end)
@@ -426,6 +448,25 @@ func fetchRollOnce(client *http.Client, apiURL string) (*apiResponse, error) {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// applyEventStart drops consumed and vetoed events earlier than cutoff, in
+// place, so pre-event test data never reaches any calculation.
+func applyEventStart(state *stateBlock, cutoff time.Time) {
+	consumed := state.Consumed[:0]
+	for _, e := range state.Consumed {
+		if !e.ConsumedAt.Before(cutoff) {
+			consumed = append(consumed, e)
+		}
+	}
+	state.Consumed = consumed
+	vetoed := state.Vetoed[:0]
+	for _, v := range state.Vetoed {
+		if !v.VetoedAt.Before(cutoff) {
+			vetoed = append(vetoed, v)
+		}
+	}
+	state.Vetoed = vetoed
 }
 
 func filterWindow(events []ConsumedEvent, start, end time.Time) []ConsumedEvent {

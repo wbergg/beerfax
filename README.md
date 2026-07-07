@@ -51,6 +51,13 @@ No external Go dependencies — pure stdlib.
 The `telephony` block sets the Asterisk destination extension (`dest_ext`),
 the fax caller ID, and the from-name stamped on the fax header.
 
+`event_start` is optional (`YYYY-MM-DD`): when set, all consumed/vetoed
+events before that day's 04:00 cutoff are dropped after fetching, so
+pre-event test data in the backend never reaches the report (the per-day
+list, the all-time style stats, everything). The API's pre-computed pool
+totals (`x/y consumed · z in pool`) still include such data. Omit the field
+to use the full history.
+
 The `email` block is optional: omit it (or leave `to` empty) and no email is
 sent. `from` is also optional — msmtp's own config supplies the envelope
 sender. Delivery uses whatever account is configured in `~/.msmtprc`. In live
