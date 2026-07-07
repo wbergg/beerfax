@@ -5,6 +5,10 @@
     "caller_id": "\"caller_id\" <beerfax>",
     "from_name": "name"
   },
+  "email": {
+    "to": ["recipient@example.com"],
+    "from": "beerfax <sender@example.com>"
+  },
   "fax_spool_path": "/var/spool/asterisk/outgoing",
   "fax_storage_path": "./data"
 }

@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/wbergg/beerfax/internal/fax"
+	"github.com/wbergg/beerfax/internal/mail"
 )
 
 var errRollNotFound = errors.New("roll not found")
@@ -49,8 +50,16 @@ const (
 type appConfig struct {
 	APIURL         string          `json:"api_url"`
 	Telephony      telephonyConfig `json:"telephony"`
+	Email          emailConfig     `json:"email"`
 	FaxSpoolPath   string          `json:"fax_spool_path"`
 	FaxStoragePath string          `json:"fax_storage_path"`
+}
+
+// emailConfig is optional: with no recipients configured the email step is
+// skipped entirely and beerfax behaves as before.
+type emailConfig struct {
+	To   []string `json:"to"`
+	From string   `json:"from"`
 }
 
 type telephonyConfig struct {
@@ -193,6 +202,8 @@ func run() int {
 		message += "\nvs yesterday: " + delta
 	}
 	baseSubject := fmt.Sprintf("%s Daily Roll %s", truncate(resp.EventName, 60), start.Format("2006-01-02"))
+	emailBody := message + "\n\nFull report attached as PDF.\n\n" + body
+	pdfName := fmt.Sprintf("beerfax-%s.pdf", start.Format("2006-01-02"))
 
 	pageTiffs := make([]string, 0, len(pages))
 	for i, pageText := range pages {
@@ -228,10 +239,14 @@ func run() int {
 	}
 
 	if *dryRun {
-		pdfPath := filepath.Join(jobDir, "preview.pdf")
+		pdfPath := filepath.Join(jobDir, pdfName)
 		if _, err := fax.ConvertTIFFToPDF(pdfPath, pageTiffs...); err != nil {
 			log.Printf("dry-run pdf: %v", err)
 			return 6
+		}
+		if err := sendReportEmail(cfg.Email, "[DRY-RUN] "+baseSubject, emailBody, pdfPath); err != nil {
+			log.Printf("dry-run email: %v", err)
+			return 8
 		}
 		log.Printf("dry-run: tiff at %s, pdf at %s (%d page(s), events=%d, jobDir=%s)", tiffPath, pdfPath, len(pageTiffs), len(events), jobDir)
 		return 0
@@ -258,8 +273,20 @@ func run() int {
 			log.Printf("date replay pdf: %v", err)
 			return 6
 		}
+		if err := sendReportEmail(cfg.Email, baseSubject+" (replay)", emailBody, pdfPath); err != nil {
+			log.Printf("date replay email: %v", err)
+			return 8
+		}
 		log.Printf("date replay: archived tiff at %s, pdf at %s (events=%d, jobDir=%s)", archivePath, pdfPath, len(events), jobDir)
 		return 0
+	}
+
+	// The PDF only feeds the email report, so a conversion failure must not
+	// block the fax: log it and queue anyway.
+	pdfPath := filepath.Join(jobDir, pdfName)
+	if _, err := fax.ConvertTIFFToPDF(pdfPath, pageTiffs...); err != nil {
+		log.Printf("report pdf: %v (continuing without email)", err)
+		pdfPath = ""
 	}
 
 	callFile, err := fax.WriteCallFile(cfg.FaxSpoolPath, int(jobID), cfg.Telephony.DestExt, tiffPath, jobDir, cfg.Telephony.CallerID)
@@ -267,9 +294,36 @@ func run() int {
 		log.Printf("call file: %v", err)
 		return 7
 	}
-
 	log.Printf("queued fax: %s (events=%d, jobDir=%s)", callFile, len(events), jobDir)
+
+	if pdfPath != "" {
+		if err := sendReportEmail(cfg.Email, baseSubject, emailBody, pdfPath); err != nil {
+			log.Printf("email: %v (fax was still queued)", err)
+			return 8
+		}
+	}
 	return 0
+}
+
+// sendReportEmail emails the report text with the PDF attached via msmtp.
+// With no recipients configured it is a silent no-op so the fax pipeline
+// works without an email setup.
+func sendReportEmail(cfg emailConfig, subject, textBody, pdfPath string) error {
+	if len(cfg.To) == 0 {
+		log.Printf("email: no recipients configured, skipping")
+		return nil
+	}
+	if err := mail.Send(mail.Message{
+		From:        cfg.From,
+		To:          cfg.To,
+		Subject:     subject,
+		Body:        textBody,
+		Attachments: []string{pdfPath},
+	}); err != nil {
+		return err
+	}
+	log.Printf("email: sent %q to %s", subject, strings.Join(cfg.To, ", "))
+	return nil
 }
 
 func loadConfig(path string) (*appConfig, error) {
