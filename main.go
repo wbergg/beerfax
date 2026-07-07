@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	netmail "net/mail"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -340,6 +341,19 @@ func loadConfig(path string) (*appConfig, error) {
 	}
 	if cfg.Telephony.DestExt == 0 || cfg.Telephony.CallerID == "" || cfg.Telephony.FromName == "" {
 		return nil, fmt.Errorf("missing telephony.dest_ext, telephony.caller_id or telephony.from_name in %s", path)
+	}
+	// msmtp gets recipients as bare envelope addresses, so each entry must be
+	// a full user@domain (no display-name form, no local usernames).
+	for i, addr := range cfg.Email.To {
+		parsed, err := netmail.ParseAddress(addr)
+		if err != nil || parsed.Address != addr || !strings.Contains(addr, "@") {
+			return nil, fmt.Errorf("email.to[%d]: %q is not a plain user@domain address", i, addr)
+		}
+	}
+	if cfg.Email.From != "" {
+		if _, err := netmail.ParseAddress(cfg.Email.From); err != nil {
+			return nil, fmt.Errorf("email.from: %q is not a valid address: %v", cfg.Email.From, err)
+		}
 	}
 	return cfg, nil
 }
