@@ -105,6 +105,7 @@ type ConsumedEvent struct {
 	Volume          int       `json:"volume"`
 	Style           string    `json:"style"`
 	DecisionSeconds float64   `json:"decisionSeconds"`
+	Points          int       `json:"points"`
 }
 
 type VetoedEvent struct {
@@ -383,6 +384,12 @@ func loadConfig(path string) (*appConfig, error) {
 	return cfg, nil
 }
 
+// windowDay returns the 04:00 cutoff that starts the day window containing t.
+func windowDay(t time.Time, loc *time.Location) time.Time {
+	tl := t.In(loc).Add(-4 * time.Hour)
+	return time.Date(tl.Year(), tl.Month(), tl.Day(), 4, 0, 0, 0, loc)
+}
+
 // dayWindow returns the in-progress 04:00→now Europe/Stockholm window:
 // start is the most recent 04:00 cutoff (today's if we're past it, otherwise
 // yesterday's), end is now. AddDate (not Add(-24h)) is used so DST transition
@@ -510,23 +517,19 @@ func deltaLine(today, prev []ConsumedEvent) string {
 // event has only spanned a single day so far, since the count would just
 // repeat the stats line.
 func dailyConsumption(all []ConsumedEvent, windowStart, windowEnd time.Time, loc *time.Location) string {
-	windowDay := func(t time.Time) time.Time {
-		tl := t.In(loc).Add(-4 * time.Hour)
-		return time.Date(tl.Year(), tl.Month(), tl.Day(), 4, 0, 0, 0, loc)
-	}
 	counts := map[time.Time]int{}
 	var first time.Time
 	for _, e := range all {
 		if !e.ConsumedAt.Before(windowEnd) {
 			continue
 		}
-		d := windowDay(e.ConsumedAt)
+		d := windowDay(e.ConsumedAt, loc)
 		counts[d]++
 		if first.IsZero() || d.Before(first) {
 			first = d
 		}
 	}
-	last := windowDay(windowStart)
+	last := windowDay(windowStart, loc)
 	if first.IsZero() || first.Equal(last) {
 		return ""
 	}
@@ -625,8 +628,9 @@ func renderBody(s Summary, loc *time.Location) string {
 			leaderNameW = len(sec.name)
 		}
 	}
+	const leaderboardTitle = "Leaderboard (consumed beers)"
 	rows := make([]string, 0, len(sections))
-	innerW := utf8.RuneCountInString("Leaderboard")
+	innerW := utf8.RuneCountInString(leaderboardTitle)
 	rankW := len(strconv.Itoa(len(sections))) + 2
 	for i, sec := range sections {
 		prefix := fmt.Sprintf("%*s", rankW, fmt.Sprintf("%d.", i+1))
@@ -639,12 +643,40 @@ func renderBody(s Summary, loc *time.Location) string {
 	}
 	border := "+" + strings.Repeat("-", innerW+2) + "+"
 	b.WriteString(border + "\n")
-	fmt.Fprintf(&b, "| %-*s |\n", innerW, "Leaderboard")
+	fmt.Fprintf(&b, "| %-*s |\n", innerW, leaderboardTitle)
 	b.WriteString(border + "\n")
 	for _, row := range rows {
 		fmt.Fprintf(&b, "| %-*s |\n", innerW, row)
 	}
 	b.WriteString(border + "\n\n")
+
+	if rows := fulolPoints(s.AllEvents, s.Participants, s.Start, s.End); len(rows) > 0 {
+		b.WriteString("Fulöl points (total):\n")
+		peak, pnameW := 0, 0
+		for _, r := range rows {
+			if r.total > peak {
+				peak = r.total
+			}
+			if len(r.name) > pnameW {
+				pnameW = len(r.name)
+			}
+		}
+		prankW := len(strconv.Itoa(len(rows))) + 1
+		for i, r := range rows {
+			today := ""
+			if r.today > 0 {
+				today = fmt.Sprintf(" (+%d today)", r.today)
+			}
+			fmt.Fprintf(&b, " %*s %-*s %-30s %d%s\n",
+				prankW, fmt.Sprintf("%d.", i+1), pnameW, r.name, barChars(r.total, peak, 30), r.total, today)
+		}
+		b.WriteString("\n")
+	}
+
+	if tbl := fulolPointsPerDay(s.AllEvents, s.Participants, s.Start, s.End, loc); tbl != "" {
+		b.WriteString(tbl)
+		b.WriteString("\n")
+	}
 
 	used, notUsed := vetoStatus(s.Participants, s.Vetoes)
 	if len(used) > 0 {
@@ -777,6 +809,133 @@ func renderBody(s Summary, loc *time.Location) string {
 			b.WriteString(truncate(line, 110))
 			b.WriteString("\n")
 		}
+	}
+	return b.String()
+}
+
+type pointsRow struct {
+	name  string
+	total int
+	today int
+}
+
+// fulolPoints sums each participant's points across the whole event (capped
+// at end so --date replays reproduce that day's standings), plus the portion
+// earned inside the current [start, end) window. All app participants are
+// listed, including those still at 0; consumers missing from the participant
+// list get a row too. Ordered by total desc, alphabetical tiebreak. Returns
+// nil when no event has scored a point, since the list would say nothing.
+func fulolPoints(all []ConsumedEvent, participants []Participant, start, end time.Time) []pointsRow {
+	byName := map[string]*pointsRow{}
+	rows := make([]*pointsRow, 0, len(participants))
+	add := func(name string) *pointsRow {
+		r := &pointsRow{name: name}
+		byName[name] = r
+		rows = append(rows, r)
+		return r
+	}
+	for _, p := range participants {
+		if p.Username != "" {
+			add(p.Username)
+		}
+	}
+	scored := false
+	for _, e := range all {
+		if e.ConsumedByName == "" || !e.ConsumedAt.Before(end) {
+			continue
+		}
+		if e.Points != 0 {
+			scored = true
+		}
+		r := byName[e.ConsumedByName]
+		if r == nil {
+			r = add(e.ConsumedByName)
+		}
+		r.total += e.Points
+		if e.ConsumedAt.Compare(start) >= 0 {
+			r.today += e.Points
+		}
+	}
+	if !scored {
+		return nil
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].total != rows[j].total {
+			return rows[i].total > rows[j].total
+		}
+		return rows[i].name < rows[j].name
+	})
+	out := make([]pointsRow, len(rows))
+	for i, r := range rows {
+		out[i] = *r
+	}
+	return out
+}
+
+// fulolPointsPerDay renders a per-user × per-day points matrix that grows a
+// column per event day, e.g.
+//
+//	Fulöl points per day:
+//	           07-05  07-06  07-07  total
+//	  coral        9     22     12     43
+//
+// Rows match fulolPoints ordering (total desc, alphabetical tiebreak) and use
+// the same cutoffs: events at/after windowEnd are ignored, days run from the
+// first consumed event through the current window. Returns "" when the event
+// has only spanned one day (the total list already shows today) or when
+// nothing has scored.
+func fulolPointsPerDay(all []ConsumedEvent, participants []Participant, windowStart, windowEnd time.Time, loc *time.Location) string {
+	rows := fulolPoints(all, participants, windowStart, windowEnd)
+	if rows == nil {
+		return ""
+	}
+	perDay := map[string]map[time.Time]int{}
+	var first time.Time
+	for _, e := range all {
+		if e.ConsumedByName == "" || !e.ConsumedAt.Before(windowEnd) {
+			continue
+		}
+		d := windowDay(e.ConsumedAt, loc)
+		if first.IsZero() || d.Before(first) {
+			first = d
+		}
+		m, ok := perDay[e.ConsumedByName]
+		if !ok {
+			m = map[time.Time]int{}
+			perDay[e.ConsumedByName] = m
+		}
+		m[d] += e.Points
+	}
+	last := windowDay(windowStart, loc)
+	if first.IsZero() || first.Equal(last) {
+		return ""
+	}
+	days := []time.Time{}
+	for d := first; !d.After(last); d = d.AddDate(0, 0, 1) {
+		days = append(days, d)
+	}
+
+	nameW := 0
+	for _, r := range rows {
+		if len(r.name) > nameW {
+			nameW = len(r.name)
+		}
+	}
+	const colW = 5 // fits the "MM-DD" headers and any realistic point total
+
+	var b strings.Builder
+	b.WriteString("Fulöl points per day:\n")
+	fmt.Fprintf(&b, "  %-*s", nameW, "")
+	for _, d := range days {
+		fmt.Fprintf(&b, "  %*s", colW, d.Format("01-02"))
+	}
+	fmt.Fprintf(&b, "  %*s\n", colW, "total")
+	for _, r := range rows {
+		fmt.Fprintf(&b, "  %-*s", nameW, r.name)
+		for _, d := range days {
+			fmt.Fprintf(&b, "  %*d", colW, perDay[r.name][d])
+		}
+		fmt.Fprintf(&b, "  %*d\n", colW, r.total)
 	}
 	return b.String()
 }
