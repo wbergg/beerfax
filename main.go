@@ -191,6 +191,9 @@ func run() int {
 	}
 
 	body := renderBody(summary, loc)
+	if dayList := dailyConsumption(resp.State.Consumed, start, end, loc); dayList != "" {
+		body = dayList + "\n" + body
+	}
 	pages := paginate(body, linesPerPage)
 	final := make([]string, 0, len(pages))
 	for _, p := range pages {
@@ -203,7 +206,7 @@ func run() int {
 		message += "\nvs yesterday: " + delta
 	}
 	baseSubject := fmt.Sprintf("%s Daily Roll %s", truncate(resp.EventName, 60), start.Format("2006-01-02"))
-	emailBody := message + "\n\nFull report attached as PDF.\n\n" + body
+	emailBody := message + "\n\n" + body + "\nFull report attached as PDF.\n"
 	pdfName := fmt.Sprintf("beerfax-%s.pdf", start.Format("2006-01-02"))
 
 	pageTiffs := make([]string, 0, len(pages))
@@ -452,6 +455,56 @@ func deltaLine(today, prev []ConsumedEvent) string {
 		countryLabel = "country"
 	}
 	return fmt.Sprintf("%+d %s, %+d %s", beerDelta, beerLabel, countryDelta, countryLabel)
+}
+
+// dailyConsumption lists each 04:00-window day from the first consumed event
+// through the current window's day, with a day-over-day diff from the second
+// line on:
+//
+//	2026-07-06 - 45 beers consumed
+//	2026-07-07 - 62(+17) beers consumed
+//
+// Days between with no events show as 0. Events at or after windowEnd are
+// ignored so a --date replay reproduces that day's view. Returns "" when the
+// event has only spanned a single day so far, since the count would just
+// repeat the stats line.
+func dailyConsumption(all []ConsumedEvent, windowStart, windowEnd time.Time, loc *time.Location) string {
+	windowDay := func(t time.Time) time.Time {
+		tl := t.In(loc).Add(-4 * time.Hour)
+		return time.Date(tl.Year(), tl.Month(), tl.Day(), 4, 0, 0, 0, loc)
+	}
+	counts := map[time.Time]int{}
+	var first time.Time
+	for _, e := range all {
+		if !e.ConsumedAt.Before(windowEnd) {
+			continue
+		}
+		d := windowDay(e.ConsumedAt)
+		counts[d]++
+		if first.IsZero() || d.Before(first) {
+			first = d
+		}
+	}
+	last := windowDay(windowStart)
+	if first.IsZero() || first.Equal(last) {
+		return ""
+	}
+	var b strings.Builder
+	prev, havePrev := 0, false
+	for d := first; !d.After(last); d = d.AddDate(0, 0, 1) {
+		n := counts[d]
+		label := "beers"
+		if n == 1 {
+			label = "beer"
+		}
+		if havePrev {
+			fmt.Fprintf(&b, "%s - %d(%+d) %s consumed\n", d.Format("2006-01-02"), n, n-prev, label)
+		} else {
+			fmt.Fprintf(&b, "%s - %d %s consumed\n", d.Format("2006-01-02"), n, label)
+		}
+		prev, havePrev = n, true
+	}
+	return b.String()
 }
 
 func distinctCountries(events []ConsumedEvent) int {
